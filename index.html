@@ -657,15 +657,14 @@ function renderDetail() {
 
   // Build history
   let history = [];
-  let running = 0, pIdx = 0;
-  c.loans.forEach(l => {
+  c.loans.forEach((l, li) => {
     let actualGiven = l.amount - (l.charges || 0);
     let repayable = l.emi && l.emiCount ? l.emi * l.emiCount : actualGiven + (actualGiven * (l.interest || 0) / 100) + (l.charges || 0);
     let emiInfo = l.emi && l.emiCount ? ` (${l.emiCount} × ₹${l.emi})` : '';
-    while (pIdx < c.payments.length && running < repayable) {
-      running += c.payments[pIdx].amount; pIdx++;
-    }
-    let settled = running >= repayable;
+    // Get payments for this specific loan using loanIdx
+    let loanPayments = c.payments.filter(p => p.loanIdx === li);
+    let paidForThisLoan = loanPayments.reduce((sum, p) => sum + p.amount, 0);
+    let settled = paidForThisLoan >= repayable;
     history.push({ date: l.date, amt: l.amount, emiInfo, type: 'loan', settled });
   });
   c.payments.forEach(p => history.push({ date: p.date, amt: p.amount, type: 'pay', settled: false }));
@@ -692,7 +691,9 @@ function renderDetail() {
     c.loans.forEach((l, li) => {
       if (!l.emi || !l.emiCount) return;
       let repayable = l.emi * l.emiCount;
-      let cumulativePaid = c.payments.reduce((a, p) => a + p.amount, 0);
+      // Count payments specifically for this loan using loanIdx
+      let loanPayments = c.payments.filter(p => p.loanIdx === li);
+      let cumulativePaid = loanPayments.reduce((a, p) => a + p.amount, 0);
 
       payListHtml += `<div class="emi-card">
         <div class="emi-header">💰 Loan ₹${l.amount.toLocaleString()} · Charges ₹${(l.charges||0).toLocaleString()} · ${l.interest}% interest</div>`;
@@ -701,7 +702,12 @@ function renderDetail() {
         let emiDate = new Date(l.date);
         emiDate.setDate(emiDate.getDate() + (e - 1) * 7);
         let emiDateStr = emiDate.toISOString().split('T')[0];
-        let isPaid = cumulativePaid >= l.emi * e;
+        // Check if this specific EMI (loanIdx + emi number) has been paid
+        let isPaid = loanPayments.some(p => p.date === emiDateStr && p.amount === l.emi);
+        // Fallback: check by cumulative count
+        if (!isPaid && loanPayments.length >= e) {
+          isPaid = true;
+        }
         let cls = isPaid ? 'paid' : '';
         let disabled = isPaid ? 'disabled' : '';
         let tick = isPaid ? '<span class="pay-tick">✓</span>' : '';
@@ -848,7 +854,7 @@ function renderDetail() {
 
     <div class="section">
       <div class="section-header">Record Payment</div>
-      <div id="payList"></div>
+      ${payListHtml}
       <div id="payActions" style="display:none;margin-top:10px;">
         <button class="btn btn-success" onclick="markPaid()">✓ Mark Selected as Paid</button>
       </div>
@@ -919,15 +925,66 @@ function addPayment() {
 }
 
 function onEMIChange() {
-  let checked = document.querySelectorAll('#emiList input[type="checkbox"]:not(:disabled):checked');
+  let checked = document.querySelectorAll('#payList input[type="checkbox"]:not(:disabled):checked');
   document.getElementById('payActions').style.display = checked.length > 0 ? 'block' : 'none';
+}
+
+function markPaid() {
+  let checked = document.querySelectorAll('#payList input[type="checkbox"]:not(:disabled):checked');
+  if (checked.length === 0) return;
+  checked.forEach(cb => {
+    customers[selectedIdx].payments.push({ amount: +cb.dataset.amount, date: cb.dataset.date, loanIdx: +cb.dataset.loan });
+  });
+  save();
+  renderDetail();
+}
+
+function editPayment(loanIdx, emiNum) {
+  let c = customers[selectedIdx];
+  let l = c.loans[loanIdx];
+  let emiDate = new Date(l.date);
+  emiDate.setDate(emiDate.getDate() + (emiNum - 1) * 7);
+  let newDate = prompt('Edit EMI date:', emiDate.toISOString().split('T')[0]);
+  if (!newDate) return;
+  let newAmt = prompt('Edit EMI amount:', l.emi);
+  if (!newAmt) return;
+  // Find and update the payment by loanIdx and matching EMI number
+  let paymentIdx = c.payments.findIndex(p => p.loanIdx === loanIdx && p.date === emiDate.toISOString().split('T')[0]);
+  if (paymentIdx >= 0) {
+    c.payments[paymentIdx] = { amount: +newAmt, date: newDate, loanIdx: loanIdx };
+  }
+  save();
+  renderDetail();
+}
+
+function deletePayment(loanIdx, emiNum) {
+  let c = customers[selectedIdx];
+  let l = c.loans[loanIdx];
+  let emiDate = new Date(l.date);
+  emiDate.setDate(emiDate.getDate() + (emiNum - 1) * 7);
+  let targetDate = emiDate.toISOString().split('T')[0];
+  if (!confirm('Delete this payment?')) return;
+  // Find payment by loanIdx and date
+  let paymentIdx = c.payments.findIndex(p => p.loanIdx === loanIdx && p.date === targetDate);
+  if (paymentIdx >= 0) {
+    c.payments.splice(paymentIdx, 1);
+  }
+  save();
+  renderDetail();
 }
 
 function renderEMISection() {
   let c = customers[selectedIdx];
   let totalEMI = 0;
-  c.loans.forEach(l => { if (l.emi && l.emiCount) totalEMI += l.emi * l.emiCount; });
-  let paidEMI = c.payments.reduce((a, p) => a + p.amount, 0);
+  let paidEMI = 0;
+  c.loans.forEach((l, li) => {
+    if (l.emi && l.emiCount) {
+      totalEMI += l.emi * l.emiCount;
+      // Sum only payments for this specific loan using loanIdx
+      let loanPayments = c.payments.filter(p => p.loanIdx === li);
+      paidEMI += loanPayments.reduce((a, p) => a + p.amount, 0);
+    }
+  });
   let remaining = Math.max(0, totalEMI - paidEMI);
   if (totalEMI === 0) return '<div class="empty-state"><div class="empty-text">No EMI schedule</div></div>';
   let pct = Math.round((paidEMI / totalEMI) * 100);
